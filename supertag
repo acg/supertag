@@ -7,11 +7,11 @@ use Pod::Usage qw/pod2usage/;
 use Audio::SuperTag::Plugin;
 use strict;
 
-our $VERSION = '0.01';
+our $VERSION = '0.1';
 our $TRACE = 0;
 sub warning($) { trace(0, $TRACE, @_) }
 sub verbose($) { trace(1, $TRACE, @_) }
-sub debug($) { trace(2, $TRACE, @_) }
+sub debug($)   { trace(2, $TRACE, @_) }
 
 my %known_tags = (
   'ALBUM'    => 'A',
