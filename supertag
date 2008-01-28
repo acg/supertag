@@ -493,9 +493,9 @@ sub hash_union {
 
 __END__
 
-=head1 NAME 
+=head1 NAME
 
-B<supertag> - organize your music collection like a real superhero
+supertag - organize your music collection like a real superhero
 
 =head1 SYNOPSIS
 
@@ -596,7 +596,7 @@ You've got music pouring in from many sources, in different formats, with differ
 
 =item *
 
-There's too much entropy in the raw materials to work from a mouse-driven interface.
+There's too much entropy in the inputs for a mouse-driven interface.
 
 =item *
 
@@ -612,7 +612,7 @@ You'd rather edit tag data in your favorite editor than anywhere else.
 
 =item *
 
-You're comfortable in a unix shell.
+You're more comfortable in a unix shell.
 
 =back
 
