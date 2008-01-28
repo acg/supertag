@@ -3,10 +3,15 @@
 use Getopt::Long;
 use Cwd qw/realpath/;
 use Errno qw/:POSIX/;
+use Pod::Usage qw/pod2usage/;
 use Audio::SuperTag::Plugin;
 use strict;
 
 our $VERSION = '0.01';
+our $TRACE = 0;
+sub warning($) { trace(0, $TRACE, @_) }
+sub verbose($) { trace(1, $TRACE, @_) }
+sub debug($) { trace(2, $TRACE, @_) }
 
 my %known_tags = (
   'ALBUM'    => 'A',
@@ -19,17 +24,35 @@ my %known_tags = (
   'COMMENT'  => 'C',
 );
 
+my %tag_abbrev = map { $known_tags{$_} => $_ } keys %known_tags;
+
 my %known_sources = (
   'id3v1'    => '1',
   'id3v2'    => '2',
   'flac'     => 'F',
   'filename' => 'N',
-  'audio'    => 'I',
+  'audio'    => 'U',
   'codec'    => 'E',
 );
 
 my @default_sources = qw/id3v2 id3v1 flac filename/;
 my %sources;
+
+my @general_options = qw/
+  get|g
+  set|s
+  help|h
+  version|V
+  dry|n
+  library|L=s
+  headers|H:s
+  mime
+  no-default-sources|S
+  rename-pattern|p=s
+  capture-pattern|P=s
+  debug|d
+  verbose|v
+  quiet|q/;
 
 my %mime2ext = (
   'audio/mpeg'   => 'mp3',
@@ -53,22 +76,27 @@ if (-e (my $config_file = "$ENV{HOME}/.supertag/config")) {
 
 parse_options();
 
+if ($opt->{quiet}) {
+  $TRACE = -1;
+}
+if ($opt->{debug}) {
+  $TRACE = 2;
+}
+elsif ($opt->{verbose}) {
+  $TRACE = 1;
+}
 
 if ($opt->{set}) {
 
   while (<STDIN>) {
     chomp;
 
-    my %tags =
-      map { s/%(\d\d)/chr(hex($1))/ge; $_ } 
-        map split(/=/, $_, 2) => split /\|/;
+    my %tags = map split(/=/, $_, 2) => scan_tabular($_);
 
-    die "error, missing PATH field: unable to set tags" unless
-      $tags{PATH};
+    my $file = $tags{PATH} ||
+      die "error, missing PATH field: unable to set tags";
 
-    my $mime = filetype($tags{PATH});
-    my $codec = $mime2ext{$mime};
-    my $obj = "$plugins{$codec}"->new($tags{PATH});
+    my $obj = plugin_obj($file) || next;
 
     set_tags($obj, \%tags);
   }
@@ -78,23 +106,44 @@ elsif ($opt->{get}) {
   my @sources = 
     ('options', sort { $sources{$a} <=> $sources{$b} } keys %sources);
 
+  my @headers;
+
+  if ($opt->{headers}) {
+    if ($opt->{headers} ne '1') {
+      @headers = split /,/ => $opt->{headers};
+      @headers = map $tag_abbrev{$_} || $_ => @headers;
+    }
+    else {
+      @headers = keys %known_tags;
+    }
+
+    print format_tabular(@headers);
+    print "\n";
+  }
+
   my $have_argv = @ARGV;
 
   while (my $file = $have_argv ? shift @ARGV : <STDIN>) {
     chomp $file;
-
-    my $mime = filetype($file);
-    my $codec = $mime2ext{$mime};
-    my $obj = "$plugins{$codec}"->new($file);
+   
+    my $obj = plugin_obj($file) || next;
     my $tags = {};
 
     $tags = hash_union($tags, get_tags($obj, $_)) for @sources;
 
-    print join "|" =>
-      map { s/([^[:print:]]|%|\|)/"%".sprintf('%02x',ord($1))/ge; $_ }
+    if (@headers) {
+      print format_tabular(
+        map defined $tags->{$_} ? $tags->{$_} : '' =>
+          @headers
+      );
+    }
+    else {
+      print format_tabular(
         map "$_=$tags->{$_}" =>
           grep defined $tags->{$_} =>
-            sort keys %$tags;
+            sort keys %$tags
+      );
+    }
 
     print "\n";
   }
@@ -102,6 +151,10 @@ elsif ($opt->{get}) {
 elsif ($opt->{version}) {
   print "supertag $VERSION\n";
   print "plugins: ".join(", " => keys %plugins)."\n";
+}
+elsif ($opt->{help}) {
+  pod2usage('-exitval' => 'NOEXIT', '-sections' => 'NAME|OPTIONS');
+  exit 1;
 }
 
 exit 0;
@@ -152,11 +205,13 @@ sub set_tags {
     map { defined $tags->{$_} ? ($_ => $tags->{$_}) : () }
       keys %known_tags;
 
-  if ($opt->{dry}) {
-    print "setting tags for $file\n";
-  }
-  else {
-    $obj->set_tags($tags);
+  if ($sources{id3v1} || $sources{id3v2} || $sources{flac}) {
+    if ($opt->{dry}) {
+      print "setting tags for $file\n";
+    }
+    else {
+      $obj->set_tags($tags);
+    }
   }
 
   if ($sources{filename}) {
@@ -188,23 +243,14 @@ sub parse_options {
   };
 
   my @getopt = (
-    qw/get|g
-       set|s
-       help|h
-       verbose|v
-       version|V
-       dry|n
-       library|L=s
-       mime
-       set-sources|S
-       rename-pattern|p=s
-       capture-pattern|P=s/,
+    @general_options,
     (map { +"$_|$known_sources{$_}!" => $source_option } keys %known_sources),
     (map "$_|".lc($_)."|$known_tags{$_}:s" => keys %known_tags),
   );
 
   Getopt::Long::Configure('bundling', 'no_ignorecase');
-  GetOptions($opt, @getopt) or die;
+  GetOptions($opt, @getopt) or
+    die "use supertag --help to see options\n";
 
   if ($opt->{get} && !defined $opt->{'capture-pattern'}) {
     warn "will not scrape filenames (specify --capture-pattern)\n" if
@@ -212,7 +258,7 @@ sub parse_options {
     $opt->{filename} = 0;
   }
 
-  unless ($opt->{'set-sources'}) {
+  unless ($opt->{'no-default-sources'}) {
     for my $source (@default_sources) {
       next if exists $opt->{$source} && !$opt->{$source};
       next if exists $sources{$source};
@@ -260,6 +306,20 @@ sub load_plugin {
   return eval "require $pkg" ? $pkg : undef;
 }
 
+sub plugin_obj {
+  my $file = shift;
+  my $mime = filetype($file);
+  my $codec = defined $mime ? $mime2ext{$mime} : undef;
+  my $plugin_pkg = defined $codec ? $plugins{$codec} : undef;
+
+  unless ($plugin_pkg) {
+    warning qq{no plugin available for "$file".\n};
+    return undef;
+  };
+
+  return "$plugin_pkg"->new($file);
+}
+
 sub normalize_tags {
   my $tags = shift;
 
@@ -267,17 +327,22 @@ sub normalize_tags {
 
   %$tags = map { uc $_ => $tags->{$_} } keys %$tags;
 
+  while (my ($k, $v) = each %$tags) {
+    my $ref = ref $v || next;
+
+    $tags->{$k} =
+      $ref eq 'ARRAY' ?
+        join "\n" => @$v :
+      $ref eq 'HASH' ?
+        join "\n" => map "$_\t$v->{$_}" => keys %$v :
+      "$v";
+  }
+
   if (($tags->{TRACKNUM}||'') =~ /^(\d+)/) {
     $tags->{TRACKNUM} = $1;
   }
   elsif ($tags->{TRACKNUM}) {
     die "bad track tag: $tags->{TRACKNUM}";
-  }
-
-  for (keys %$tags) {
-    if ('ARRAY' eq ref $tags->{$_}||'') {
-      $tags->{$_} = join "\n" => @{$tags->{$_}};
-    }
   }
 
   return $tags;
@@ -300,6 +365,16 @@ sub filetype {
   else {
     my $ext = ($file =~ /\.([^\.]+)$/)[0];
 
+    unless (defined $ext) {
+      debug "type unknown for file $file, no extension";
+      return undef;
+    }
+    
+    unless (defined $ext2mime{$ext}) {
+      debug "no plugin registered for $ext";
+      return undef;
+    }
+
     return $ext2mime{$ext};
   }
 }
@@ -308,11 +383,10 @@ sub scan_filename {
   my $file = shift;
   my $pattern = shift;
   my $delim = '_';
-  my %spec = map { $known_tags{$_} => $_ } keys %known_tags;
   my @match_names;
  
   $pattern =~ s!([^a-zA-Z0-9_ %/-])!\\$1!g;
-  $pattern =~ s/%([a-zA-Z])/push @match_names, $spec{$1}; "(.*?)"/eg;
+  $pattern =~ s/%([a-zA-Z])/push @match_names, $tag_abbrev{$1}; "(.*?)"/eg;
 
   for my $try ($file, basename($file)) {
     if ((my @matches = ($try =~ qr/$pattern/))) {
@@ -332,11 +406,10 @@ sub scan_filename {
 sub format_filename {
   my $pattern = shift;
   my $tags = shift;
-  my %abbrev = map { $known_tags{$_} => $_ } keys %known_tags;
 
   my $specsub = sub {
     my ($width, $format) = @_;
-    my $value = $tags->{$abbrev{$format}};
+    my $value = $tags->{$tag_abbrev{$format}};
     my $type;
 
     $width = '' if not defined $width;
@@ -375,6 +448,17 @@ sub ensure_dir {
   }
 }
 
+sub trace {
+  my $threshold = shift;
+  my $level = shift;
+
+  if ($level >= $threshold) {
+    my $msg = join "\n" => @_;
+    $msg .= "\n" unless substr($msg, -1, 1) eq "\n";
+    print $msg;
+  }
+}
+
 sub dirname {
   return $1 if $_[0] =~ m{^(.+)/([^/]+)$};
   return;
@@ -382,6 +466,16 @@ sub dirname {
 
 sub basename {
   return $_[0] =~ m{([^/]+)$} ? $1 : $_[0];
+}
+
+sub scan_tabular {
+  return map { s/%(\d\d)/chr(hex($1))/ge; $_ } 
+    split /\|/ => $_[0];
+}
+
+sub format_tabular {
+  return join "|" =>
+    map { s/([^[:print:]]|%|\|)/"%".sprintf('%02x',ord($1))/ge; $_ } @_;
 }
 
 sub hash_union {
@@ -399,46 +493,154 @@ sub hash_union {
 
 __END__
 
+=head1 NAME 
+
+B<supertag> - organize your music collection like a real superhero
+
 =head1 SYNOPSIS
 
-supertag - manage your music collection like a real man.
-
-=head1 DESCRIPTION
-
-TODO write me
+B<supertag> MODE [OPTIONS] file1.mp3 file2.flac file3.mp3 ...
 
 =head1 EXAMPLES
 
-TODO write me
+Extract metadata from audio files to a tabular format:
+
+  $ supertag -g *.mp3 *.flac
+
+Get id3v1 and id3v2 tags back in sync, then rename files using tags:
+
+  $ supertag -g *.mp3 | supertag -s -p '%02T._%A_-_%a_-_%t'
+
+Set missing tags in bulk; rename files using new tags:
+
+  $ supertag -g -A Pinkerton -y 1996 -G Rock *.flac | supertag -s
+
+Extract and set missing tag data from filenames, using a pattern:
+
+  $ supertag -g -S -N -P '%a_-_%t' *.mp3 | supertag -s
+
+Rename incoming files and import them into your music library:
+
+  $ supertag -g * | supertag -s --library ~/Music
+
+Preview the effects of supertag's default renaming operations:
+
+  $ supertag -g * | supertag -n -s -S -N
+
+Build a song database from your entire music collection:
+
+  $ sqlite songs.db <<EOF
+    > create table song(
+    >  path varchar(256) primary key,
+    >  album varchar(128),
+    >  artist varchar(128),
+    >  track varchar(128),
+    >  title varchar(128));
+    > EOF
+  $ find . -name \*.mp3 -o -name \*.flac | \
+    supertag -g -H PATH,A,a,T,t | sed -e 1d > songs.txt
+  $ sqlite songs.db ".import 'songs.txt' song"
 
 =head1 OPTIONS
 
-operating modes:
-  -g get tag info (the default mode)
-  -s set tag info
+=head2 Modes of Operation
 
-operands:
-  -1 operate on id3v1 tags (mp3 only)
-  -2 operate on id3v2 tags (mp3 only)
-  -F operate on flac tags (flac only)
-  -N operate on filenames
-  -p PATTERN format string for renaming files
-  -P PATTERN format string for scraping filenames
+  -g,--get        get metadata
+  -s,--set        set metadata
+  -h,--help       print help and exit
+  -V,--VERSION    print version and exit
 
-tags:
-  -A album
-  -a artist
-  -t title
-  -T track number
-  -y year
-  -g genre
-  -c composer
-  -C comment
+=head2 Metadata Source Options
 
-flags:
-  -m, --mime     use file(1) to determine file type (slower, default no)
-  -n, --dry      dry run (don't modify anything)
-  -v, --verbose  verbose
+  -1,--id3v1                extract from id3v1 tags (default, mp3 only)
+  -2,--id3v2                extract from id3v2 tags (default, mp3 only)
+  -F,--flac                 extract from flac tags (default, flac only)
+  -N,--filename             extract from filenames (default)
+  -U,--audio                extract standard audio metadata
+  -E,--codec                extract encoder metadata
+  -S,--no-default-sources   don't use the default sources
+  -p,--rename-pattern STR   format string for renaming files
+  -P,--capture-pattern STR  format string for scraping filenames
+
+=head2 Standard Recognized Tags
+
+  -A,--album   STR
+  -a,--artist   STR
+  -t,--title   STR
+  -T,--tracknum   NUM 
+  -y,--year   STR
+  -g,--genre   STR
+  -c,--composer   STR
+  -C,--comment   STR
+
+=head2 Behavioral Options
+
+  -H,--headers  X,Y,Z...  output headed tabular data (with -g)
+  -m,--mime               get filetype from file(1) (slow, default off)
+  -n,--dry                dry run (don't modify anything)
+  -v,--verbose            verbose
+  -d,--debug              turn on debugging messages
+  -q,--quit               silence warnings
+
+=head1 MOTIVATION 
+
+B<supertag> is a music organization tool for ordinary people who don't mind dashing into a phone booth once in a while. By "phone booth" we mean "terminal session," the celebrated origin of all superpowers...
+
+There are plenty of music organization tools out there, pretty much one for every occasion. B<supertag> makes sense when:
+
+=over 4
+
+=item *
+
+You've got music pouring in from many sources, in different formats, with different levels of metadata quantity and quality.
+
+=item *
+
+There's too much entropy in the raw materials to work from a mouse-driven interface.
+
+=item *
+
+You'd rather write a script that performs a data transformation than do it all by hand.
+
+=item *
+
+You want to do a custom search on your music collection, or you want to build a custom index.
+
+=item *
+
+You'd rather edit tag data in your favorite editor than anywhere else.
+
+=item *
+
+You're comfortable in a unix shell.
+
+=back
+
+=head1 DESCRIPTION
+
+There are two primary operating modes of B<supertag>: get mode and set mode. In get mode, metadata is extracted from a succession of sources in each file and printed to standard out. In set mode, tabular metadata is read from standard input and written to all selected sources of each referenced file.
+
+The tabular format used and expected by B<supertag> consists of metadata fields separated by the pipe character C<('|')>, with records separated by newlines. Normally, each field contains a metadata name and key separated by '=', where both key and value have had non-printable and conflicting characters escaped after a URL-encoding (C<"\n" => "%0a">) fashion. The C<--headers> option accepts a comma-separated list of headers, and causes a line of metadata keys to appear first, followed by records consisting only of metadata values. This headered format is probably more useful for database imports.
+
+By default, B<supertag> operates on a standard set of metadata sources. Some sources are filetype-specific ("id3v2" only applies to .mp3s) and some are standard ("filename" is always available). B<supertag> will never apply filetype-specific sources to files of the wrong filetype. Two special sources, "audio" and "codec" always give standard digital audio metadata ("SAMPLERATE", "NUMCHANNELS", "SECS", etc.) and encoding-specific metadata (e.g. "MP3_LAYER", "MP3_VBR", etc.), respectively.
+
+In get mode, the special metadata key "PATH" is always added with the full, real path to the file being processed as the value. This metadata key must be present for every input record under set mode.
+
+For performance reasons, filetype is by default determined by looking at file extension. Content-based filetype detection via file(1) can be enabled with the C<--mime> flag.
+
+Different audio filetypes are handled through a plugin architecture. This presents a uniform interface to B<supertag>. Developers interested in adding support for new filetypes should subclass all methods in C<Audio::SuperTag::Plugin> via a package called e.g. C<Audio::SuperTag::Plugin::MYFORMAT>.
+
+=head1 TODO
+
+=over 4
+
+=item * adopt (or contribute) something with id3v2 write support
+
+=item * offer capitalization fixing
+
+=item * implement Ogg plugin 
+
+=back
 
 =head1 AUTHOR
 
@@ -453,4 +655,5 @@ it under the same terms as Perl itself, either Perl version 5.8.3 or, at
 your option, any later version of Perl 5 you may have available.
 
 =cut
+
 
