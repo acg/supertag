@@ -1,12 +1,9 @@
 #!/usr/bin/perl -w
 
-# TODO switch to a codec-specific plugin architecture
-
 use Getopt::Long;
 use Cwd qw/realpath/;
 use Errno qw/:POSIX/;
-use MP3::Info qw/get_mp3tag set_mp3tag get_mp3info/;
-use Audio::FLAC::Header;
+use Audio::SuperTag::Plugin;
 use strict;
 
 our $VERSION = '0.01';
@@ -31,52 +28,33 @@ my %known_sources = (
   'codec'    => 'E',
 );
 
-my %source_priority = do {
-  my $i = 0;
-  map { $_ => $i++ } qw/options id3v2 id3v1 flac filename audio codec/;
-};
+my @default_sources = qw/id3v2 id3v1 flac filename/;
+my %sources;
 
 my %mime2ext = (
   'audio/mpeg'   => 'mp3',
   'audio/x-flac' => 'flac',
 );
 
-my %ext2mime = map { $mime2ext{$_} => $_ } keys %mime2ext;
+my %ext2mime =
+  map { $mime2ext{$_} => $_ } keys %mime2ext;
 
-my @getopt = (
-  qw/get|g
-     set|s
-     help|h
-     verbose|v
-     dry|n
-     library|L=s
-     mime
-     rename-pattern|p=s
-     capture-pattern|P=s/,
-  (map "$_|$known_sources{$_}!" => keys %known_sources),
-  (map "$_|".lc($_)."|$known_tags{$_}:s" => keys %known_tags),
-);
+my %plugins =
+  map { my $p = load_plugin($_); $p ? ($_=>$p) : () } values %mime2ext;
 
-my %opt = (
-  'id3v1'    => 1,
-  'id3v2'    => 1,
-  'flac'     => 1,
-  'filename' => 1,
+my $opt = {
   'rename-pattern' => '%a_-_%A/%02T._%a_-_%t',
-  'capture-pattern' => '%a_-_%A/%02T._%a_-_%t',
-);
+};
 
 if (-e (my $config_file = "$ENV{HOME}/.supertag/config")) {
   my $config = read_config($config_file);
-  my $newopt = hash_union($config, \%opt);
-  %opt = %$newopt;
+  $opt = hash_union($config, $opt);
 }
 
-Getopt::Long::Configure('bundling', 'no_ignorecase');
-GetOptions(\%opt, @getopt) or die;
+parse_options();
 
 
-if ($opt{set}) {
+if ($opt->{set}) {
 
   while (<STDIN>) {
     chomp;
@@ -85,25 +63,32 @@ if ($opt{set}) {
       map { s/%(\d\d)/chr(hex($1))/ge; $_ } 
         map split(/=/, $_, 2) => split /\|/;
 
-    set_tags(\%tags);
+    die "error, missing PATH field: unable to set tags" unless
+      $tags{PATH};
+
+    my $mime = filetype($tags{PATH});
+    my $codec = $mime2ext{$mime};
+    my $obj = "$plugins{$codec}"->new($tags{PATH});
+
+    set_tags($obj, \%tags);
   }
 }
-elsif ($opt{get}) {
-
-  # TODO allow user to set source priority through order of options
+elsif ($opt->{get}) {
 
   my @sources = 
-    sort { $source_priority{$a} <=> $source_priority{$b} }
-        ('options', grep $opt{$_} => keys %known_sources);
+    ('options', sort { $sources{$a} <=> $sources{$b} } keys %sources);
 
   my $have_argv = @ARGV;
 
   while (my $file = $have_argv ? shift @ARGV : <STDIN>) {
     chomp $file;
 
+    my $mime = filetype($file);
+    my $codec = $mime2ext{$mime};
+    my $obj = "$plugins{$codec}"->new($file);
     my $tags = {};
 
-    $tags = hash_union($tags, get_tags($file, $_)) for @sources;
+    $tags = hash_union($tags, get_tags($obj, $_)) for @sources;
 
     print join "|" =>
       map { s/([^[:print:]]|%|\|)/"%".sprintf('%02x',ord($1))/ge; $_ }
@@ -114,73 +99,51 @@ elsif ($opt{get}) {
     print "\n";
   }
 }
+elsif ($opt->{version}) {
+  print "supertag $VERSION\n";
+  print "plugins: ".join(", " => keys %plugins)."\n";
+}
 
 exit 0;
 
 
 sub get_tags {
-  my $file = shift;
+  my $obj = shift;
   my $source = shift;
   my $tags;
 
   $tags =
     $source eq 'options' ?
-      { map { exists $opt{$_} ? ($_=>$opt{$_}) : () } keys %known_tags }
+      { map { exists $opt->{$_} ? ($_=>$opt->{$_}) : () } keys %known_tags }
     :
     $source eq 'filename' ?
-      scan_filename($file, $opt{'capture-pattern'})
+      scan_filename($obj->file, $opt->{'capture-pattern'})
     :
     $source =~ /^id3v(1|2)$/ ?
-      (filetype($file) eq 'audio/mpeg' ? get_mp3tag($file, $1) : {})
+      ($obj->filetype eq 'mp3' ? $obj->get_tags($1) : {})
     :
     $source eq 'flac' ?
-      (filetype($file) eq 'audio/x-flac' ?
-         Audio::FLAC::Header->new($file)->tags : {})
+      ($obj->filetype eq 'flac' ? $obj->get_tags() : {})
     :
-    $source eq 'audio' ? do {
-      if (filetype($file) eq 'audio/mpeg') {
-        my $info = get_mp3info($file);
-        my %tags = (
-          SECS => $info->{SECS},
-          SAMPLERATE => $info->{FREQUENCY} * 1000,
-          NUMCHANNELS => $info->{STEREO} ? 2 : 1
-        );
-        \%tags;
-      }
-      elsif (filetype($file) eq 'audio/x-flac') {
-        my $info = Audio::FLAC::Header->new($file)->info;
-        my %tags = (
-          SECS => $info->{trackTotalLengthSeconds},
-          SAMPLERATE => $info->{SAMPLERATE},
-          NUMCHANNELS => $info->{NUMCHANNELS}
-        );
-        \%tags;
-      }
-    } :
-    $source eq 'codec' ? do {
-      if (filetype($file) eq 'audio/mpeg') {
-        my $info = get_mp3info($file);
-        my %tags = map (("MP3_$_" => $info->{$_}) => keys %$info);
-        \%tags;
-      }
-      else {
-        my $info = Audio::FLAC::Header->new($file)->info;
-        my %tags = map (("FLAC_$_" => $info->{$_}) => keys %$info);
-        \%tags;
-       }
-    } :
+    $source eq 'audio' ?
+      $obj->get_audio_info
+    :
+    $source eq 'codec' ?
+      $obj->get_codec_info
+    :
     die "unrecognized tag source $source";
 
-  $tags->{PATH} = realpath($file);     # pseudo tag
+  $tags->{PATH} = realpath($obj->file);     # pseudo tag
 
   return normalize_tags($tags);
 }
 
 sub set_tags {
+  my $obj = shift;
   my $tags = shift;
 
-  for (grep exists $opt{$_} => keys %known_tags) {
-    $tags->{$_} = $opt{$_};
+  for (grep exists $opt->{$_} => keys %known_tags) {
+    $tags->{$_} = $opt->{$_};
   }
 
   my $file = $tags->{PATH};
@@ -189,35 +152,21 @@ sub set_tags {
     map { defined $tags->{$_} ? ($_ => $tags->{$_}) : () }
       keys %known_tags;
 
-    if (filetype($file) eq 'audio/mpeg' && $opt{id3v1}) {
-      if ($opt{dry}) {
-        print "id3v1: setting tags for $file\n";
-      }
-      else {
-        # FIXME apparently MP3::Info only sets id3v1? 
-        set_mp3tag($file, \%set_tags);
-      }
-    }
-    elsif (filetype($file) eq 'audio/x-flac' && $opt{flac}) {
-      if ($opt{dry}) {
-        print "flac: setting tags for $file\n";
-      }
-      else {
-        my $flac = Audio::FLAC::Header->new($file);
-        $set_tags{TRACKNUMBER} = delete $set_tags{TRACKNUM};
-        $flac->{tags} = \%set_tags;
-        $flac->write();
-      }
-    }
+  if ($opt->{dry}) {
+    print "setting tags for $file\n";
+  }
+  else {
+    $obj->set_tags($tags);
+  }
 
-  if ($opt{filename}) {
-    my $newfile = format_filename($opt{'rename-pattern'}, $tags);
+  if ($sources{filename}) {
+    my $newfile = format_filename($opt->{'rename-pattern'}, $tags);
 
-    $newfile = join '/' => ($opt{library}, $newfile) if $opt{library};
+    $newfile = join '/' => ($opt->{library}, $newfile) if $opt->{library};
     $newfile = join '.' => $newfile, $mime2ext{filetype($file)};
 
     if ($newfile ne $file) {
-      if ($opt{dry}) {
+      if ($opt->{dry}) {
         print "rename: $file => $newfile\n";
       }
       else {
@@ -228,7 +177,48 @@ sub set_tags {
       }
     }
   }
+}
 
+sub parse_options {
+
+  my $source_option = sub {
+    my ($source, $value) = @_;
+    $opt->{$source} = $value;
+    $sources{$source} = 1+(keys %sources) if $value;
+  };
+
+  my @getopt = (
+    qw/get|g
+       set|s
+       help|h
+       verbose|v
+       version|V
+       dry|n
+       library|L=s
+       mime
+       set-sources|S
+       rename-pattern|p=s
+       capture-pattern|P=s/,
+    (map { +"$_|$known_sources{$_}!" => $source_option } keys %known_sources),
+    (map "$_|".lc($_)."|$known_tags{$_}:s" => keys %known_tags),
+  );
+
+  Getopt::Long::Configure('bundling', 'no_ignorecase');
+  GetOptions($opt, @getopt) or die;
+
+  if ($opt->{get} && !defined $opt->{'capture-pattern'}) {
+    warn "will not scrape filenames (specify --capture-pattern)\n" if
+      $opt->{filename};
+    $opt->{filename} = 0;
+  }
+
+  unless ($opt->{'set-sources'}) {
+    for my $source (@default_sources) {
+      next if exists $opt->{$source} && !$opt->{$source};
+      next if exists $sources{$source};
+      $sources{$source} = 1+(keys %sources);
+    }
+  }
 }
 
 sub read_config {
@@ -260,16 +250,22 @@ sub read_config {
   return \%config;
 }
 
+sub load_plugin {
+  my $codec = shift;
+  my $pkgbase = "Audio::SuperTag::Plugin";
+  my $pkg = join '::' => $pkgbase, uc $codec;
+  my $syms = do { no strict 'refs'; \%{"${pkgbase}::"} };
+
+  return $pkg if exists $syms->{uc($codec).'::'};
+  return eval "require $pkg" ? $pkg : undef;
+}
+
 sub normalize_tags {
   my $tags = shift;
 
   # standardize on uppercase tag names
 
   %$tags = map { uc $_ => $tags->{$_} } keys %$tags;
-
-  if (exists $tags->{TRACKNUMBER}) {
-    $tags->{TRACKNUM} = delete $tags->{TRACKNUMBER};
-  }
 
   if (($tags->{TRACKNUM}||'') =~ /^(\d+)/) {
     $tags->{TRACKNUM} = $1;
@@ -290,7 +286,7 @@ sub normalize_tags {
 sub filetype {
   my $file = shift;
 
-  if ($opt{mime}) {
+  if ($opt->{mime}) {
     open my $fh, '-|', '/usr/bin/file', '-i', '-b', $file or
       die "error running file(1): $!";
 
@@ -400,6 +396,7 @@ sub hash_union {
   return \%h;
 }
 
+
 __END__
 
 =head1 SYNOPSIS
@@ -439,7 +436,7 @@ tags:
   -C comment
 
 flags:
-  -m, --mime     use file(1) to determine file type - slower, off by default
+  -m, --mime     use file(1) to determine file type (slower, default no)
   -n, --dry      dry run (don't modify anything)
   -v, --verbose  verbose
 
