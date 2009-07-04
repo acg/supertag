@@ -1,5 +1,8 @@
 #!/usr/bin/perl -w
 
+use FindBin;
+use lib "$FindBin::RealBin/lib";
+
 use Getopt::Long;
 use Cwd qw/realpath/;
 use Errno qw/:POSIX/;
@@ -46,6 +49,7 @@ my @general_options = qw/
   dry|n
   library|L=s
   headers|H:s
+  io-format|i=s
   mime
   no-default-sources|S
   rename-pattern|p=s
@@ -67,6 +71,7 @@ my %plugins =
 
 my $opt = {
   'rename-pattern' => '%a_-_%A/%02T._%a_-_%t',
+  'io-format' => 'editable',
 };
 
 if (-e (my $config_file = "$ENV{HOME}/.supertag/config")) {
@@ -88,10 +93,33 @@ elsif ($opt->{verbose}) {
 
 if ($opt->{set}) {
 
+  local $/;
+
+  $/ = "\n" if $opt->{'io-format'} eq 'tabular';
+  $/ = "\n\n" if $opt->{'io-format'} eq 'editable';
+
+  my @infields = sort keys %known_tags;
+
   while (<STDIN>) {
     chomp;
 
-    my %tags = map split(/=/, $_, 2) => scan_tabular($_);
+    my %tags;
+
+    if ($opt->{'io-format'} eq 'tabular') { 
+      if ($. == 1 && $opt->{headers}) {
+        @infields = scan_tabular($_);
+        next;
+      }
+      elsif ($opt->{headers}) {
+        @tags{@infields} = scan_tabular($_);
+      }
+      else {
+        %tags = map split(/=/, $_, 2) => scan_tabular($_);
+      }
+    }
+    elsif ($opt->{'io-format'} eq 'editable') {
+      %tags = scan_editable($_);
+    }
 
     my $file = $tags{PATH} ||
       die "error, missing PATH field: unable to set tags";
@@ -106,19 +134,19 @@ elsif ($opt->{get}) {
   my @sources = 
     ('options', sort { $sources{$a} <=> $sources{$b} } keys %sources);
 
-  my @headers;
+  my @outfields = sort keys %known_tags;
 
   if ($opt->{headers}) {
+
     if ($opt->{headers} ne '1') {
-      @headers = split /,/ => $opt->{headers};
-      @headers = map $tag_abbrev{$_} || $_ => @headers;
-    }
-    else {
-      @headers = keys %known_tags;
+      @outfields = split /,/ => $opt->{headers};
+      @outfields = map $tag_abbrev{$_} || $_ => @outfields;
     }
 
-    print format_tabular(@headers);
-    print "\n";
+    if ($opt->{'io-format'} eq 'tabular') {
+      print format_tabular(@outfields);
+      print "\n";
+    }
   }
 
   my $have_argv = @ARGV;
@@ -131,21 +159,29 @@ elsif ($opt->{get}) {
 
     $tags = hash_union($tags, get_tags($obj, $_)) for @sources;
 
-    if (@headers) {
-      print format_tabular(
-        map defined $tags->{$_} ? $tags->{$_} : '' =>
-          @headers
-      );
-    }
-    else {
-      print format_tabular(
-        map "$_=$tags->{$_}" =>
-          grep defined $tags->{$_} =>
-            sort keys %$tags
-      );
-    }
+    if ($opt->{'io-format'} eq 'tabular') {
 
-    print "\n";
+      if ($opt->{headers}) {
+        print format_tabular(
+          map defined $tags->{$_} ? $tags->{$_} : '' =>
+            @outfields
+        );
+      }
+      else {
+        print format_tabular(
+          map "$_=$tags->{$_}" =>
+            grep defined $tags->{$_} =>
+              sort keys %$tags
+        );
+      }
+
+      print "\n";
+    }
+    elsif ($opt->{'io-format'} eq 'editable') {
+
+      print format_editable(%$tags);
+      print "\n\n";
+    }
   }
 }
 elsif ($opt->{version}) {
@@ -256,6 +292,10 @@ sub parse_options {
     warn "will not scrape filenames (specify --capture-pattern)\n" if
       $opt->{filename};
     $opt->{filename} = 0;
+  }
+
+  if (exists $opt->{headers} && $opt->{headers} eq '') {
+    $opt->{headers} = 1;
   }
 
   unless ($opt->{'no-default-sources'}) {
@@ -385,7 +425,7 @@ sub scan_filename {
   my $delim = '_';
   my @match_names;
  
-  $pattern =~ s!([^a-zA-Z0-9_ %/-])!\\$1!g;
+  $pattern =~ s!([^a-zA-Z0-9_ %.*/-])!\\$1!g;
   $pattern =~ s/%([a-zA-Z])/push @match_names, $tag_abbrev{$1}; "(.*?)"/eg;
 
   for my $try ($file, basename($file)) {
@@ -473,9 +513,26 @@ sub scan_tabular {
     split /\|/ => $_[0];
 }
 
+sub scan_editable {
+  return map { s/%(\d\d)/chr(hex($1))/ge; $_ }
+    map split( /: /, $_, 2 ) =>
+      split /\n/ => $_[0];
+}
+
 sub format_tabular {
   return join "|" =>
     map { s/([^[:print:]]|%|\|)/"%".sprintf('%02x',ord($1))/ge; $_ } @_;
+}
+
+sub format_editable {
+  my %h = @_;
+
+  for (keys %h) {
+    $h{$_} = '' unless defined $h{$_};
+    $h{$_} =~ s/([^[:print:]]|%|\n)/"%".sprintf('%02x',ord($1))/ge;
+  }
+
+  return join "\n" => map "$_: $h{$_}" => sort keys %h;
 }
 
 sub hash_union {
@@ -503,7 +560,7 @@ B<supertag> MODE [OPTIONS] file1.mp3 file2.flac file3.mp3 ...
 
 =head1 EXAMPLES
 
-Extract metadata from audio files to a tabular format:
+Extract metadata from audio files to an editable format:
 
   $ supertag -g *.mp3 *.flac
 
@@ -538,7 +595,7 @@ Build a song database from your entire music collection:
     >  title varchar(128));
     > EOF
   $ find . -name \*.mp3 -o -name \*.flac | \
-    supertag -g -H PATH,A,a,T,t | sed -e 1d > songs.txt
+    supertag -g -H PATH,A,a,T,t --io tabular | sed -e 1d > songs.txt
   $ sqlite songs.db ".import 'songs.txt' song"
 
 =head1 OPTIONS
@@ -575,7 +632,8 @@ Build a song database from your entire music collection:
 
 =head2 Behavioral Options
 
-  -H,--headers  X,Y,Z...  output headed tabular data (with -g)
+  -H,--headers  X,Y,Z...  output or input headed tabular data
+  -i,--io-format  FMT     set output or input format ("editable", "tabular")
   -m,--mime               get filetype from file(1) (slow, default off)
   -n,--dry                dry run (don't modify anything)
   -v,--verbose            verbose
@@ -618,9 +676,29 @@ You're more comfortable in a unix shell.
 
 =head1 DESCRIPTION
 
-There are two primary operating modes of B<supertag>: get mode and set mode. In get mode, metadata is extracted from a succession of sources in each file and printed to standard out. In set mode, tabular metadata is read from standard input and written to all selected sources of each referenced file.
+There are two primary operating modes of B<supertag>: get mode and set mode. In get mode, metadata is extracted from a succession of sources in each file and printed to standard out. In set mode, metadata is read from standard input and written to all selected sources of each referenced file.
 
-The tabular format used and expected by B<supertag> consists of metadata fields separated by the pipe character C<('|')>, with records separated by newlines. Normally, each field contains a metadata name and key separated by '=', where both key and value have had non-printable and conflicting characters escaped after a URL-encoding (C<"\n" => "%0a">) fashion. The C<--headers> option accepts a comma-separated list of headers, and causes a line of metadata keys to appear first, followed by records consisting only of metadata values. This headered format is probably more useful for database imports.
+The "editable" input / output format B<supertag> uses by default looks like this:
+
+  ALBUM: Evol
+  ARTIST: Sonic Youth
+  GENRE: Rock
+  PATH: ~/Music/Sonic_Youth_-_Evol/01._Sonic_Youth_-_Tom_Violence.mp3
+  TAGVERSION: ID3v2.3.0
+  TITLE: Tom Violence
+  TRACKNUM: 1
+  YEAR: 1986
+
+  ALBUM: Evol
+  ARTIST: Sonic Youth
+  GENRE: Rock
+  PATH: ~/Music/Sonic_Youth_-_Evol/02._Sonic_Youth_-_Shadow_of_a_Doubt.mp3
+  TAGVERSION: ID3v2.3.0
+  TITLE: Shadow of a Doubt
+  TRACKNUM: 2
+  YEAR: 1986
+
+Each record corresponds to one file and consists of some number of "key: value" lines. Multiple records are separated by "\n\n". Non-printable or conflicting characters in keys and values are escaped in URL-encoding (C<"\n" => "%0a">) fashion.
 
 By default, B<supertag> operates on a standard set of metadata sources. Some sources are filetype-specific ("id3v2" only applies to .mp3s) and some are standard ("filename" is always available). B<supertag> will never apply filetype-specific sources to files of the wrong filetype. Two special sources, "audio" and "codec" always give standard digital audio metadata ("SAMPLERATE", "NUMCHANNELS", "SECS", etc.) and encoding-specific metadata (e.g. "MP3_LAYER", "MP3_VBR", etc.), respectively.
 
@@ -644,11 +722,11 @@ Different audio filetypes are handled through a plugin architecture. This presen
 
 =head1 AUTHOR
 
-Alan Grow <agrow+nospam@thegotonerd.com>
+Alan Grow <agrow+nospam@iobound.net>
 
 =head1 COPYRIGHT
 
-Copyright (C) 2008 by Alan Grow
+Copyright (C) 2009 by Alan Grow
 
 This application is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.8.3 or, at
