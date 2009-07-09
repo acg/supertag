@@ -49,7 +49,7 @@ my @general_options = qw/
   dry|n
   library|L=s
   headers|H:s
-  io-format|i=s
+  io-format|I=s
   mime
   no-default-sources|S
   rename-pattern|p=s
@@ -634,8 +634,8 @@ Build a song database from your entire music collection:
 
 =item Behavioral Options
 
-  -H,--headers  X,Y,Z...  output or input headed tabular data
-  -i,--io-format  FMT     set output or input format ("editable", "tabular")
+  -H,--headers  X,Y,Z...  output only these metadata fields
+  -I,--io-format  FMT     data exchange format ("editable", "tabular")
   -m,--mime               get filetype from file(1) (slow, default off)
   -n,--dry                dry run (don't modify anything)
   -v,--verbose            verbose
