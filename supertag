@@ -600,14 +600,16 @@ Build a song database from your entire music collection:
 
 =head1 OPTIONS
 
-=head2 Modes of Operation
+=over 4
+
+=item Modes of Operation
 
   -g,--get        get metadata
   -s,--set        set metadata
   -h,--help       print help and exit
   -V,--VERSION    print version and exit
 
-=head2 Metadata Source Options
+=item Metadata Source Options
 
   -1,--id3v1                extract from id3v1 tags (default, mp3 only)
   -2,--id3v2                extract from id3v2 tags (default, mp3 only)
@@ -619,7 +621,7 @@ Build a song database from your entire music collection:
   -p,--rename-pattern STR   format string for renaming files
   -P,--capture-pattern STR  format string for scraping filenames
 
-=head2 Standard Recognized Tags
+=item Standard Recognized Tags
 
   -A,--album   STR
   -a,--artist   STR
@@ -630,7 +632,7 @@ Build a song database from your entire music collection:
   -c,--composer   STR
   -C,--comment   STR
 
-=head2 Behavioral Options
+=item Behavioral Options
 
   -H,--headers  X,Y,Z...  output or input headed tabular data
   -i,--io-format  FMT     set output or input format ("editable", "tabular")
@@ -639,6 +641,8 @@ Build a song database from your entire music collection:
   -v,--verbose            verbose
   -d,--debug              turn on debugging messages
   -q,--quit               silence warnings
+
+=back
 
 =head1 MOTIVATION 
 
